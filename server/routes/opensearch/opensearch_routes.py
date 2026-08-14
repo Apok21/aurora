@@ -26,11 +26,16 @@ def _get_creds(user_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _make_client(creds: Dict[str, Any]) -> OpenSearchClient:
+def _make_client(creds: Dict[str, Any]) -> Optional[OpenSearchClient]:
+    endpoint = creds.get("endpoint")
+    username = creds.get("username")
+    password = creds.get("password")
+    if not endpoint or not username or not password:
+        return None
     return OpenSearchClient(
-        endpoint=creds["endpoint"],
-        username=creds["username"],
-        password=creds["password"],
+        endpoint=endpoint,
+        username=username,
+        password=password,
         index_pattern=creds.get("index_pattern", "*"),
         verify_ssl=creds.get("verify_ssl", True),
         max_retries=creds.get("max_retries", 2),
@@ -202,6 +207,8 @@ def search(user_id):
     timestamp_field = data.get("timestampField", "@timestamp")
 
     client = _make_client(creds)
+    if not client:
+        return jsonify({"error": "OpenSearch not connected"}), 400
 
     try:
         result = client.search(
@@ -232,6 +239,8 @@ def list_indices(user_id):
 
     pattern = request.args.get("pattern") or creds.get("index_pattern", "*")
     client = _make_client(creds)
+    if not client:
+        return jsonify({"error": "OpenSearch not connected"}), 400
 
     try:
         indices = client.list_indices(pattern=pattern)

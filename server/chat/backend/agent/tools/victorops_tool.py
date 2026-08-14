@@ -41,9 +41,11 @@ def _get_client(user_id: str):
     from routes.victorops.victorops_helpers import VictorOpsClient
 
     creds = get_token_data(user_id, "victorops")
-    if not creds:
+    api_id = creds.get("api_id") if creds else None
+    api_key = creds.get("api_key") if creds else None
+    if not api_id or not api_key:
         return None
-    return VictorOpsClient(api_id=creds["api_id"], api_key=creds["api_key"])
+    return VictorOpsClient(api_id=api_id, api_key=api_key)
 
 
 # ---------------------------------------------------------------------------

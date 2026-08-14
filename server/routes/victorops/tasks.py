@@ -88,6 +88,77 @@ def _extract_incident_number(payload: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _first_payload_value(payload: Dict[str, Any], keys: tuple, default: str = "") -> str:
+    """Return the first truthy value for any of the given payload keys."""
+    for key in keys:
+        value = payload.get(key)
+        if value:
+            return value
+    return default
+
+
+def _extract_incident_title(payload: Dict[str, Any]) -> str:
+    return _first_payload_value(
+        payload,
+        (
+            "INCIDENT.ENTITY_DISPLAY_NAME",
+            "ALERT.entity_display_name",
+            "ALERT.title",
+            "INCIDENT_DISPLAY_NAME",
+            "ENTITY_DISPLAY_NAME",
+            "ENTITY_ID",
+        ),
+        "Untitled Incident",
+    )
+
+
+def _extract_service_name(payload: Dict[str, Any]) -> str:
+    return _first_payload_value(
+        payload,
+        (
+            "INCIDENT.SERVICE",
+            "ALERT.monitoring_tool",
+            "ALERT.entity_display_name",
+            "SERVICE",
+            "MONITORING_TOOL",
+        ),
+        "unknown",
+    )
+
+
+def _extract_entity_id(payload: Dict[str, Any]) -> str:
+    return _first_payload_value(
+        payload,
+        ("STATE.ENTITY_ID", "ALERT.entity_id", "ENTITY_ID"),
+    )
+
+
+def _extract_incident_url(payload: Dict[str, Any]) -> str:
+    return payload.get("ALERT.alert_url") or payload.get("INCIDENT_URL", "")
+
+
+def _build_alert_metadata(
+    payload: Dict[str, Any],
+    incident_number: int,
+    incident_url: str,
+    entity_id: str,
+    alert_phase: str,
+) -> Dict[str, Any]:
+    alert_metadata: Dict[str, Any] = {
+        "incidentNumber": incident_number,
+        "incidentUrl": incident_url,
+        "entityId": entity_id,
+        "alertPhase": alert_phase,
+    }
+    state_message = _first_payload_value(
+        payload,
+        ("ALERT.state_message", "ALERT.message", "STATE_MESSAGE"),
+    )
+    if state_message:
+        alert_metadata["description"] = state_message[:2000]
+    return alert_metadata
+
+
 # ---------------------------------------------------------------------------
 # Processing helpers (extracted to keep task function complexity manageable)
 # ---------------------------------------------------------------------------
@@ -114,6 +185,7 @@ def _record_primary_alert(cursor, conn, user_id, org_id, incident_db_id, event_d
         )
         conn.commit()
     except Exception as e:
+        conn.rollback()
         logger.warning("[VICTOROPS] Failed to record primary alert: %s", e)
 
 
@@ -236,53 +308,16 @@ def _run_correlation_check(
             conn.commit()
             return True
     except Exception as corr_exc:
+        conn.rollback()
         logger.warning("[VICTOROPS] Correlation check failed, proceeding normally: %s", corr_exc)
     return False
 
 
-def _process_victorops_event_in_db(
-    cursor, conn, user_id: str, payload: Dict[str, Any], received_at
-) -> None:
-    """Core DB processing extracted to keep the Celery task function complexity low."""
-    org_id = set_rls_context(cursor, conn, user_id, log_prefix="[VICTOROPS]")
-    if not org_id:
-        return
-
-    alert_phase = _normalize_phase(payload)
-    incident_number = _extract_incident_number(payload)
-    incident_title = (
-        payload.get("INCIDENT.ENTITY_DISPLAY_NAME")
-        or payload.get("ALERT.entity_display_name")
-        or payload.get("ALERT.title")
-        or payload.get("INCIDENT_DISPLAY_NAME")
-        or payload.get("ENTITY_DISPLAY_NAME")
-        or payload.get("ENTITY_ID")
-        or "Untitled Incident"
-    )
-    service_name = (
-        payload.get("INCIDENT.SERVICE")
-        or payload.get("ALERT.monitoring_tool")
-        or payload.get("ALERT.entity_display_name")
-        or payload.get("SERVICE")
-        or payload.get("MONITORING_TOOL")
-        or "unknown"
-    )
-    entity_id = (
-        payload.get("STATE.ENTITY_ID")
-        or payload.get("ALERT.entity_id")
-        or payload.get("ENTITY_ID")
-        or ""
-    )
-    incident_url = payload.get("ALERT.alert_url") or payload.get("INCIDENT_URL", "")
-
-    if not incident_number:
-        logger.warning("[VICTOROPS] No INCIDENT_NUMBER in payload for user %s, skipping", user_id)
-        return
-
-    severity = _extract_severity(payload)
-    aurora_status = _extract_status(alert_phase)
-
-    # Persist raw event
+def _persist_victorops_event(
+    cursor, conn, user_id, org_id, alert_phase, incident_number,
+    incident_title, service_name, entity_id, payload, received_at,
+) -> Optional[int]:
+    """Insert the raw VictorOps event row and return its id."""
     cursor.execute(
         """
         INSERT INTO victorops_events
@@ -295,35 +330,15 @@ def _process_victorops_event_in_db(
          service_name, entity_id, json.dumps(payload), received_at),
     )
     event_result = cursor.fetchone()
-    event_db_id = event_result[0] if event_result else None
     conn.commit()
+    return event_result[0] if event_result else None
 
-    if not event_db_id:
-        return
 
-    alert_metadata: Dict[str, Any] = {
-        "incidentNumber": incident_number,
-        "incidentUrl": incident_url,
-        "entityId": entity_id,
-        "alertPhase": alert_phase,
-    }
-    state_message = (
-        payload.get("ALERT.state_message")
-        or payload.get("ALERT.message")
-        or payload.get("STATE_MESSAGE")
-        or ""
-    )
-    if state_message:
-        alert_metadata["description"] = state_message[:2000]
-
-    # Correlation check for triggered events
-    if alert_phase == "TRIGGERED":
-        if _run_correlation_check(cursor, conn, user_id, org_id, event_db_id,
-                                   incident_title, service_name, severity,
-                                   alert_metadata, payload):
-            return
-
-    # Upsert incident
+def _upsert_victorops_incident(
+    cursor, conn, user_id, org_id, incident_number, incident_title,
+    service_name, severity, aurora_status, alert_metadata, received_at,
+):
+    """Upsert the incidents row; return (id, inserted, previous_status)."""
     cursor.execute(
         """
         WITH prev AS (
@@ -356,30 +371,24 @@ def _process_victorops_event_in_db(
         ),
     )
     incident_row = cursor.fetchone()
-    incident_db_id = incident_row[0] if incident_row else None
-    incident_was_inserted = bool(incident_row[1]) if incident_row else False
-    previous_status = incident_row[2] if incident_row else None
     conn.commit()
+    if not incident_row:
+        return None, False, None
+    return incident_row[0], bool(incident_row[1]), incident_row[2]
 
-    if not incident_db_id:
-        return
 
-    # Record primary alert for triggered events
-    if alert_phase == "TRIGGERED":
-        _record_primary_alert(cursor, conn, user_id, org_id, incident_db_id, event_db_id,
-                               incident_title, service_name, severity, alert_metadata)
-
-    # Lifecycle events
-    lifecycle_writes = []
+def _build_lifecycle_writes(incident_was_inserted, alert_phase, previous_status, aurora_status):
+    """Build lifecycle event tuples for the current transition."""
     if incident_was_inserted and alert_phase == "TRIGGERED":
-        lifecycle_writes.append(("created", None, "investigating"))
-    elif previous_status is not None and previous_status != aurora_status:
+        return [("created", None, "investigating")]
+    if previous_status is not None and previous_status != aurora_status:
         ev_name = "resolved" if aurora_status == "resolved" else "status_changed"
-        lifecycle_writes.append((ev_name, previous_status, aurora_status))
+        return [(ev_name, previous_status, aurora_status)]
+    return []
 
-    _write_lifecycle_events(cursor, conn, incident_db_id, user_id, org_id, lifecycle_writes)
 
-    # SSE broadcast
+def _broadcast_incident_sse(user_id, incident_db_id):
+    """Notify connected clients about an incident update."""
     try:
         from routes.incidents_sse import broadcast_incident_update_to_user_connections
         broadcast_incident_update_to_user_connections(
@@ -389,13 +398,74 @@ def _process_victorops_event_in_db(
     except Exception as e:
         logger.warning("[VICTOROPS] Failed to notify SSE: %s", e)
 
-    # Summary + RCA only for new triggered incidents
-    if alert_phase == "TRIGGERED" and incident_was_inserted:
-        _schedule_summary_and_rca(user_id, incident_db_id, incident_title, incident_number,
-                                   severity, service_name, payload, alert_metadata, cursor, conn)
 
-    logger.info("[VICTOROPS] Processed %s event for incident #%s (db_id=%s)",
-                alert_phase, incident_number, incident_db_id)
+def _process_victorops_event_in_db(
+    cursor, conn, user_id: str, payload: Dict[str, Any], received_at
+) -> None:
+    """Core DB processing extracted to keep the Celery task function complexity low."""
+    org_id = set_rls_context(cursor, conn, user_id, log_prefix="[VICTOROPS]")
+    if not org_id:
+        return
+
+    alert_phase = _normalize_phase(payload)
+    incident_number = _extract_incident_number(payload)
+    if not incident_number:
+        logger.warning("[VICTOROPS] No INCIDENT_NUMBER in payload for user %s, skipping", user_id)
+        return
+
+    incident_title = _extract_incident_title(payload)
+    service_name = _extract_service_name(payload)
+    entity_id = _extract_entity_id(payload)
+    incident_url = _extract_incident_url(payload)
+    severity = _extract_severity(payload)
+    aurora_status = _extract_status(alert_phase)
+
+    event_db_id = _persist_victorops_event(
+        cursor, conn, user_id, org_id, alert_phase, incident_number,
+        incident_title, service_name, entity_id, payload, received_at,
+    )
+    if not event_db_id:
+        return
+
+    alert_metadata = _build_alert_metadata(
+        payload, incident_number, incident_url, entity_id, alert_phase,
+    )
+
+    if alert_phase == "TRIGGERED" and _run_correlation_check(
+        cursor, conn, user_id, org_id, event_db_id,
+        incident_title, service_name, severity, alert_metadata, payload,
+    ):
+        return
+
+    incident_db_id, incident_was_inserted, previous_status = _upsert_victorops_incident(
+        cursor, conn, user_id, org_id, incident_number, incident_title,
+        service_name, severity, aurora_status, alert_metadata, received_at,
+    )
+    if not incident_db_id:
+        return
+
+    if alert_phase == "TRIGGERED":
+        _record_primary_alert(
+            cursor, conn, user_id, org_id, incident_db_id, event_db_id,
+            incident_title, service_name, severity, alert_metadata,
+        )
+
+    lifecycle_writes = _build_lifecycle_writes(
+        incident_was_inserted, alert_phase, previous_status, aurora_status,
+    )
+    _write_lifecycle_events(cursor, conn, incident_db_id, user_id, org_id, lifecycle_writes)
+    _broadcast_incident_sse(user_id, incident_db_id)
+
+    if alert_phase == "TRIGGERED" and incident_was_inserted:
+        _schedule_summary_and_rca(
+            user_id, incident_db_id, incident_title, incident_number,
+            severity, service_name, payload, alert_metadata, cursor, conn,
+        )
+
+    logger.info(
+        "[VICTOROPS] Processed %s event for incident #%s (db_id=%s)",
+        alert_phase, incident_number, incident_db_id,
+    )
 
 
 # ---------------------------------------------------------------------------

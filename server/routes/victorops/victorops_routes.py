@@ -1,14 +1,20 @@
 """Splunk On-Call (VictorOps) integration routes."""
 
 import hmac
-import json
 import logging
 import os
+from typing import Any, Dict, Optional
 
 from flask import Blueprint, jsonify, request
 
 from utils.auth.rbac_decorators import require_permission
+from utils.auth.stateless_auth import (
+    get_org_id_for_user,
+    get_org_id_from_request,
+    set_rls_context,
+)
 from utils.auth.token_management import get_token_data, store_tokens_in_db
+from utils.db.connection_pool import db_pool
 from utils.log_sanitizer import sanitize
 from utils.secrets.secret_ref_utils import delete_user_secret
 from routes.victorops.victorops_helpers import (
@@ -22,11 +28,47 @@ logger = logging.getLogger(__name__)
 victorops_bp = Blueprint("victorops", __name__)
 
 
+def _get_stored_victorops_credentials(user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve VictorOps credentials for a user, falling back to an org-scoped token."""
+    try:
+        data = get_token_data(user_id, "victorops")
+        if data:
+            return data
+
+        org_id = get_org_id_from_request() or get_org_id_for_user(user_id)
+        if not org_id:
+            return None
+
+        with db_pool.get_admin_connection() as conn:
+            with conn.cursor() as cursor:
+                set_rls_context(cursor, conn, user_id, log_prefix="[VICTOROPS:get_creds]")
+                cursor.execute(
+                    "SELECT user_id FROM user_tokens "
+                    "WHERE org_id = %s AND provider = 'victorops' "
+                    "AND is_active = TRUE AND secret_ref IS NOT NULL "
+                    "LIMIT 1",
+                    (org_id,),
+                )
+                row = cursor.fetchone()
+
+        if row:
+            return get_token_data(row[0], "victorops") or None
+
+        return None
+    except Exception as exc:
+        logger.error(
+            "[VICTOROPS] Failed to retrieve credentials for user %s: %s",
+            sanitize(user_id),
+            sanitize(exc),
+        )
+        return None
+
+
 @victorops_bp.route("", methods=["GET"])
 @require_permission("connectors", "read")
 def victorops_status(user_id):
     """Get Splunk On-Call connection status."""
-    creds = get_token_data(user_id, "victorops")
+    creds = _get_stored_victorops_credentials(user_id)
     if not creds:
         return jsonify({"connected": False})
 
@@ -137,7 +179,7 @@ def webhook(user_id: str):
             logger.warning("[VICTOROPS] Webhook rejected: invalid or missing X-Webhook-Secret for user %s", sanitize(user_id))
             return jsonify({"error": "Forbidden"}), 403
 
-    creds = get_token_data(user_id, "victorops")
+    creds = _get_stored_victorops_credentials(user_id)
     if not creds:
         logger.warning(
             "[VICTOROPS] Webhook received for user %s with no VictorOps connection",

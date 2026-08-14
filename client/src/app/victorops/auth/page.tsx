@@ -50,8 +50,12 @@ export default function VictorOpsAuthPage() {
       if (!skipCache && globalThis.window !== undefined) {
         const cached = localStorage.getItem(CACHE_KEY);
         if (cached) {
-          const minimal = JSON.parse(cached) as VictorOpsStatus;
-          setStatus(minimal);
+          try {
+            const minimal = JSON.parse(cached) as VictorOpsStatus;
+            setStatus(minimal);
+          } catch {
+            localStorage.removeItem(CACHE_KEY);
+          }
         }
       }
       await fetchAndUpdateStatus();

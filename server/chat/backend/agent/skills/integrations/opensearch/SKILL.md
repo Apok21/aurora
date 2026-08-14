@@ -21,15 +21,18 @@ metadata:
 # OpenSearch Integration
 
 ## Overview
+
 OpenSearch integration for querying log data during Root Cause Analysis. OpenSearch is a REMOTE service — do NOT search the local filesystem. Use ONLY the tools listed below.
 
 ## Instructions
 
 ### Tool Usage (use in this order)
+
 1. `list_opensearch_indices()` — Discover available indices. Call first to understand what data exists.
 2. `search_opensearch(query='error', start_time='now-1h')` — Search for logs matching a Lucene query.
 
 ### Common Query Patterns
+
 - Error search: `search_opensearch(query='error AND service:api', start_time='now-1h')`
 - Specific service: `search_opensearch(query='kubernetes.labels.app:payment-service AND level:error', start_time='now-30m')`
 - HTTP 5xx: `search_opensearch(query='http.response.status_code:>=500', start_time='now-1h')`
@@ -37,6 +40,7 @@ OpenSearch integration for querying log data during Root Cause Analysis. OpenSea
 - Specific index: `search_opensearch(query='NullPointerException', index='app-logs-*', start_time='now-1h')`
 
 ### Time Format
+
 - Relative: `now-1h`, `now-30m`, `now-6h`, `now-1d`
 - Absolute: ISO-8601 strings (`2024-01-15T10:00:00Z`)
 
@@ -55,6 +59,7 @@ OpenSearch integration for querying log data during Root Cause Analysis. OpenSea
 Use `start_time` and `end_time` to focus on the exact incident window.
 
 ## Important Rules
+
 - OpenSearch is a REMOTE service. Never try to access data from the local filesystem.
 - Always use `list_opensearch_indices` first if you're unsure which index to search.
 - Keep queries focused — use specific service names and time ranges to avoid huge result sets.

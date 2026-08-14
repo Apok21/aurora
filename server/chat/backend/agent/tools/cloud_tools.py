@@ -2170,9 +2170,9 @@ Once you identify which account has the issue, pass account_id (e.g. 'account') 
             args_schema=OpenSearchListIndicesArgs,
         ))
 
-        logging.info(f"Added 2 OpenSearch tools for user {user_id}")
+        logging.info("Added 2 OpenSearch tools for user %s", user_id)
     else:
-        logging.debug(f"OpenSearch tools not added - user {user_id} not connected to OpenSearch")
+        logging.debug("OpenSearch tools not added - user %s not connected to OpenSearch", user_id)
 
     # Add incident.io tools if connected
     if is_incidentio_connected(user_id):
@@ -2377,7 +2377,7 @@ Once you identify which account has the issue, pass account_id (e.g. 'account') 
             ),
             args_schema=GetVictorOpsTeamsArgs,
         ))
-        logging.info(f"Added Splunk On-Call (VictorOps) tools for user {user_id}")
+        logging.info("Added Splunk On-Call (VictorOps) tools for user %s", user_id)
 
     # Add Bitbucket tools if connected
     try:

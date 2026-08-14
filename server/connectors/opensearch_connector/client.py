@@ -162,7 +162,8 @@ class OpenSearchClient:
     def normalize_endpoint(raw: str) -> str:
         """Ensure endpoint has a scheme and no trailing slash."""
         url = raw.strip().rstrip("/")
-        if not url.startswith(("http://", "https://")):
+        # Self-hosted OpenSearch may use HTTP on private networks; bare hosts default to HTTPS.
+        if not url.startswith(("http://", "https://")):  # NOSONAR
             url = f"https://{url}"
         parsed = urlparse(url)
         if not parsed.netloc:
