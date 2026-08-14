@@ -55,11 +55,10 @@ def _get_stored_victorops_credentials(user_id: str) -> Optional[Dict[str, Any]]:
             return get_token_data(row[0], "victorops") or None
 
         return None
-    except Exception as exc:
-        logger.error(
-            "[VICTOROPS] Failed to retrieve credentials for user %s: %s",
+    except Exception:
+        logger.exception(
+            "[VICTOROPS] Failed to retrieve credentials for user %s",
             sanitize(user_id),
-            sanitize(exc),
         )
         return None
 

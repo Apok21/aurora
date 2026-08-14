@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 opensearch_bp = Blueprint("opensearch", __name__)
 
+_NOT_CONNECTED_ERROR = "OpenSearch not connected"
+
 
 def _get_creds(user_id: str) -> Optional[Dict[str, Any]]:
     try:
@@ -190,7 +192,7 @@ def search(user_id):
     """Execute a query against OpenSearch and return matching log entries."""
     creds = _get_creds(user_id)
     if not creds:
-        return jsonify({"error": "OpenSearch not connected"}), 400
+        return jsonify({"error": _NOT_CONNECTED_ERROR}), 400
 
     data = request.get_json(force=True, silent=True) or {}
     query = data.get("query", "").strip()
@@ -208,7 +210,7 @@ def search(user_id):
 
     client = _make_client(creds)
     if not client:
-        return jsonify({"error": "OpenSearch not connected"}), 400
+        return jsonify({"error": _NOT_CONNECTED_ERROR}), 400
 
     try:
         result = client.search(
@@ -235,12 +237,12 @@ def list_indices(user_id):
     """List available indices in the cluster."""
     creds = _get_creds(user_id)
     if not creds:
-        return jsonify({"error": "OpenSearch not connected"}), 400
+        return jsonify({"error": _NOT_CONNECTED_ERROR}), 400
 
     pattern = request.args.get("pattern") or creds.get("index_pattern", "*")
     client = _make_client(creds)
     if not client:
-        return jsonify({"error": "OpenSearch not connected"}), 400
+        return jsonify({"error": _NOT_CONNECTED_ERROR}), 400
 
     try:
         indices = client.list_indices(pattern=pattern)

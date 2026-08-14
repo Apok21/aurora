@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import posixpath
+import re
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -12,6 +14,9 @@ from requests.auth import HTTPBasicAuth
 logger = logging.getLogger(__name__)
 
 OPENSEARCH_TIMEOUT = (5, 20)
+
+# OpenSearch index names / patterns used in URL paths (wildcards and multi-index allowed).
+_INDEX_NAME_RE = re.compile(r"^[a-zA-Z0-9_.*+\-,]+$")
 
 
 class OpenSearchError(Exception):
@@ -47,8 +52,36 @@ class OpenSearchClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _sanitize_index_name(name: str) -> str:
+        """Validate and URL-encode an index name/pattern for path use."""
+        if not isinstance(name, str):
+            raise OpenSearchError("Invalid OpenSearch index name")
+        cleaned = name.strip()
+        if not cleaned or not _INDEX_NAME_RE.fullmatch(cleaned):
+            raise OpenSearchError("Invalid OpenSearch index name")
+        if ".." in cleaned:
+            raise OpenSearchError("Invalid OpenSearch index name")
+        # Keep wildcard/multi-index chars unescaped for OpenSearch path semantics.
+        return quote(cleaned, safe="*+,-._")
+
     def _url(self, path: str) -> str:
-        return f"{self.endpoint}/{path.lstrip('/')}"
+        """Build a request URL from a relative API path (no user host override)."""
+        if not path.startswith("/"):
+            raise OpenSearchError("Invalid API path: must start with /")
+        parsed = urlparse(path)
+        if parsed.scheme or parsed.netloc:
+            raise OpenSearchError("Invalid API path: must be a relative path")
+        if parsed.query or parsed.fragment:
+            raise OpenSearchError("Invalid API path: query/fragment not allowed")
+        decoded = unquote(parsed.path)
+        if "/.." in decoded or "\\" in decoded:
+            raise OpenSearchError("Invalid API path: path traversal not allowed")
+        normalized = posixpath.normpath(decoded)
+        # posixpath.normpath("/") == "/"; reject other non-canonical forms (e.g. "/a/../b").
+        if normalized != decoded:
+            raise OpenSearchError("Invalid API path: non-canonical path segments not allowed")
+        return f"{self.endpoint}{parsed.path}"
 
     def _http_error_to_opensearch_error(self, exc: requests.HTTPError) -> OpenSearchError:
         """Convert an HTTPError to a descriptive OpenSearchError."""
@@ -103,8 +136,12 @@ class OpenSearchClient:
 
     def list_indices(self, pattern: Optional[str] = None) -> List[Dict[str, Any]]:
         """List indices matching the pattern."""
-        pat = pattern or self.index_pattern
-        return self._request("GET", f"/_cat/indices/{pat}?format=json&h=index,health,status,docs.count,store.size")
+        pat = self._sanitize_index_name(pattern or self.index_pattern)
+        return self._request(
+            "GET",
+            f"/_cat/indices/{pat}",
+            params={"format": "json", "h": "index,health,status,docs.count,store.size"},
+        )
 
     def search(
         self,
@@ -126,7 +163,8 @@ class OpenSearchClient:
             size: Max number of hits to return
             timestamp_field: Name of the timestamp field
         """
-        idx = index or self.index_pattern
+        raw_idx = index or self.index_pattern
+        idx = self._sanitize_index_name(raw_idx)
         must: List[Dict] = [{"query_string": {"query": query, "default_operator": "AND"}}]
 
         if start_time or end_time:
@@ -149,13 +187,13 @@ class OpenSearchClient:
         return {
             "total": hits.get("total", {}).get("value", 0),
             "hits": [h.get("_source", {}) for h in hits.get("hits", [])],
-            "index": idx,
+            "index": raw_idx,
             "query": query,
         }
 
     def get_field_mapping(self, index: Optional[str] = None) -> Dict[str, Any]:
         """Return field mappings to discover available log fields."""
-        idx = index or self.index_pattern
+        idx = self._sanitize_index_name(index or self.index_pattern)
         return self._request("GET", f"/{idx}/_mapping")
 
     @staticmethod
